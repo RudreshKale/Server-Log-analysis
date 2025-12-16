@@ -1,0 +1,195 @@
+---
+title: "R Notebook"
+output:
+  word_document: default
+  html_notebook: default
+---
+BIS 581
+#load libraries
+```{r libs, echo=FALSE, message=FALSE, warning=FALSE}
+# Introduction This notebook analyzes server log data to assist the CIO in understanding Virtual Desktop Infrastructure (VDI) usage for the year 2015. The analysis focuses on user volume, daily traffic trends, and specific application usage patterns.
+
+library(tidytext)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggraph)
+library(igraph)
+library(lubridate)
+library(tidyverse)
+library(stringr)
+```
+
+```{r}
+VDI <- read.csv("vdi_serverlogs.csv", header=TRUE, stringsAsFactors = FALSE)
+
+apps <- read.csv("vdi_statsapps.csv", header=TRUE, stringsAsFactors = FALSE)
+```
+
+join the two together
+```{r}
+apps$VDI_ID <- as.integer(apps$VDI_ID)
+usage <-  VDI %>% inner_join(apps)
+#clean up
+
+```
+Answer the questions handed out on Blackboard
+Create a presentation of their findings. The audience for the presentation is the CIO, assistant CIO and some of the tech managers along with a representative from purchasing. Your R notebook will be the appendix to show how you got the answers you did. NOTE: graduate students have extra for this, see Blackboard for details
+```{r}
+# Check the raw date range before filtering
+date_check <- usage %>%
+  mutate(temp_date = mdy_hm(logon_DTS)) %>%
+  filter(year(temp_date) == 2015) %>%
+  summarise(
+    Earliest_Logon = min(temp_date, na.rm = TRUE),
+    Latest_Logon = max(temp_date, na.rm = TRUE)
+  )
+print(date_check)
+#Data Quality Finding: The dataset for 2015 ends in late August. This implies that "Annual" totals will actually reflect an 8-month period. This is a risk to the analysis as Q4 data is missing.
+
+crash_check <- usage %>%
+  filter(stop == "1900-01-01 00:00:00") %>%
+  tally()
+
+total_rows <- nrow(usage)
+crash_pct <- round((crash_check$n / total_rows) * 100, 2)
+
+print(paste("Total rows with invalid stop times:", crash_check$n))
+print(paste("Percentage of dataset affected:", crash_pct, "%"))
+
+#Approximately 17% of the application logs indicate crashes (invalid stop times). To prevent skewing the "Average Application Duration" metric, we will convert these specific errors to NA and exclude them from duration calculations. However, we will retain these rows for "Total User" counts, as the user was still present on the system.
+```
+
+```{r}
+# Data Wrangling & Cleaning
+# Based on the assessment above, we apply the following cleaning rules:
+# 
+# Date Conversion: Convert character strings to Date/Time objects.
+# 
+# Scope Filtering: Limit to Year 2015 and Machine Names starting with "CMU".
+# 
+# Error Handling: Convert '1900-01-01' stop times to NA.
+#
+# Feature Engineering: Calculate app_duration.
+
+#  STEP 1: DATA WRANGLING (Clean & Filter)
+# We take the raw 'usage' data and apply the CIO's rules:
+# 1. Fix the dates (mdy_hm based on your screenshots)
+# 2. Filter for Year 2015
+# 3. Filter for VDI machines (Start with "CMU")
+
+usage_2015_clean <- usage %>%
+  mutate(
+    # 1. Fix Date Formats
+    logon_DTS = mdy_hm(logon_DTS),
+    logout_DTS = mdy_hm(logout_DTS),
+    start = ymd_hms(start),
+    stop = ymd_hms(stop)
+  ) %>%
+  # 2. Filter for Year 2015 & VDI Machines ("CMU")
+  filter(year(logon_DTS) == 2015) %>%
+  filter(str_detect(comp_name, "^CMU")) %>%
+  mutate(
+    # 3. Fix Data Errors (Apps that crashed)
+    stop = na_if(stop, ymd_hms("1900-01-01 00:00:00")),
+    
+    # 4. Create Duration Column
+    app_duration = as.numeric(difftime(stop, start, units = "mins"))
+  )
+
+# Verify cleaning
+summary(usage_2015_clean$app_duration)
+
+```
+
+
+```{r}
+# General CIO Questions
+# --- PART A: GENERAL QUESTIONS (For Everyone) ---
+
+# 1. Calculate Daily Traffic
+daily_stats <- usage_2015_clean %>%
+  mutate(day = as_date(logon_DTS)) %>%
+  group_by(day) %>%
+  summarise(users_today = n_distinct(userid))
+
+# 2. Print The Answers
+print(" GENERAL CIO REPORT ")
+print(paste("1. Total Unique Users:", n_distinct(usage_2015_clean$userid)))
+print(paste("2. Average Users Per Day:", round(mean(daily_stats$users_today), 0)))
+print(paste("3. Highest Users in a Single Day:", max(daily_stats$users_today)))
+```
+
+```{r}
+
+# --- PART B: GROUP I-L SPECIFIC QUESTIONS ---
+
+# Question 1: Top 3 users by logins using Windows Remote OS
+top_windows_users <- usage_2015_clean %>%
+  # Filter for any OS containing "Windows" (case insensitive)
+  filter(str_detect(remote_od, regex("Windows", ignore_case = TRUE))) %>%
+  group_by(userid) %>%
+  summarise(login_count = n()) %>% # Count how many times they appear
+  arrange(desc(login_count)) %>%   # Sort Highest to Lowest
+  head(3)                          # Keep Top 3
+
+print("TOP 3 USERS (WINDOWS OS) ")
+print(top_windows_users)
+
+
+# Question 2: Top 3 applications by length of time run
+top_apps_time <- usage_2015_clean %>%
+  group_by(app_name) %>%
+  summarise(
+    # Sum minutes, ignoring the NAs (crashes)
+    total_minutes = sum(app_duration, na.rm = TRUE) 
+  ) %>%
+  arrange(desc(total_minutes)) %>% # Sort Highest to Lowest
+  head(3)                          # Keep Top 3
+
+print("TOP 3 APPS (BY DURATION)")
+print(top_apps_time)
+
+
+# --- PART C: VISUALIZATION ---
+# (Required for the report)
+ggplot(top_apps_time, aes(x = reorder(app_name, -total_minutes), y = total_minutes, fill = app_name)) +
+  geom_col() +
+  labs(title = "Most Used Applications (2015)",
+       subtitle = "Ranked by Total Runtime (Minutes)",
+       x = "Application Name",
+       y = "Total Minutes") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+
+```{r}
+# RESOURCE ANALYSIS 
+# We want to know: Do the "Top Apps" also use the most CPU?
+
+cpu_analysis <- usage_2015_clean %>%
+  filter(!is.na(avg_cpu)) %>% # Remove the bad CPU rows
+  group_by(app_name) %>%
+  summarise(
+    avg_cpu_usage = mean(avg_cpu),
+    total_minutes = sum(app_duration, na.rm = TRUE)
+  ) %>%
+  arrange(desc(avg_cpu_usage)) %>% # Sort by Heaviest CPU load
+  head(5)
+
+print("--- HEAVIEST CPU APPS ---")
+print(cpu_analysis)
+
+# Quick Chart for the CIO
+ggplot(cpu_analysis, aes(x = reorder(app_name, avg_cpu_usage), y = avg_cpu_usage)) +
+  geom_col(fill = "darkred") +
+  coord_flip() +  # <--- THIS FLIPS THE CHART SIDEWAYS
+  labs(title = "Top 5 CPU-Intensive Applications",
+       subtitle = "Apps utilizing >50% CPU on average",
+       x = "Application Name",
+       y = "Average CPU Usage (%)") +
+  theme_minimal()
+
+#The High CPU: Student code is often unoptimized. If a student writes an infinite loop or a heavy calculation for "Chapter 3 Hands On," it will spike the CPU to 81% or 100%, exactly as your data shows.
+```
